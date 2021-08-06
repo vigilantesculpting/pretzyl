@@ -1,72 +1,15 @@
 #!/usr/bin/env python
 
 """A simple Forth-like stack based interpreter
-
-Pretzyl implements a simple Forth-like interpreter.
-The interpreter accepts an dict-like Environment and a set of Operators.
-
-Input is broken into words, separated by whitespace and/or string deliminators and brackets.
-Special tokens that denote these are quotes [", '] and brackets [(, )]
-
-Input starts with a fresh heap of stacks, containing a single stack.
-Each input word is evaluated in turn:
-- If it is an opening bracket, a new stack is pushed onto the heap of stacks.
-- If it is a closing bracket, the top stack is removed, and its contents placed on the new top stack.
-- If a word evaluates to an operator, the operator is applied to the stack.
-- Otherwise, the word is simply placed on top of the current top stack.
-Once all words have been evaluated, the stack's contents is returned to the caller.
-
-Operators operate on the words on the stack. Typically, operators are binary or unary.
-This means they operate on the top two (binary) words or the top (unary) word.
-They place their results on top of the stack.
-
-Words come in two types: references and literals.
-Literals are numbers and strings.
-References are names, that are looked up in the provided Environment, typically before
-the operator works on them.
-
-Operators are non-greedy, and only run once.
-Operators can be modified to run a specified number of times, or be greedy, in which
-case they will operate until they fail (typically stack underflow or stack overflow)
-
-Example 1: Simple algebra:
-	2 2 2 ** 4 +*
-	=> 8 4 +*
-	=> 12
-
-Example 2: Nested algebra:
-	2 (2 2 **) 4 +*
-	=> 2 4 4 +*
-	=> 10
-
-Example 3: With lookup:
-	env = {'name': 'Jack'}
-	'hello ' name '!' +*
-	=> 'hello Jack!'
-
-Example 4: Filepath construction:
-	env = {'key': 'a7c34bd'}
-	'static' 'css' ('site-' key '.html' +*) pathjoin*
-	=> 'static' 'css' 'site-a7c34bd.html' pathjoin*
-	=> 'static/css/site-a7c34bd.html'
-
-Usage:
-	>>> from pretzyl import Pretzyl
-	>>> env = {'key': 'a7c34bd'}
-	>>> p = Pretzyl(env)
-	>>> print p.eval("'static' 'css' ('site-' key '.html' +*) pathjoin*")
-	static/css/site-a7c34bd.html
-
 """
 
-import shlex
+import tokenyze
 import sys
 import re
-
-#import pdb
+import os
 
 #For internal debug use
-LOG = False
+LOG = True
 
 def log(*args, **kwargs):
 	"""For internal debug use
@@ -98,265 +41,452 @@ class Reference:
 	def __repr__(self):
 		return "Reference(%s)" % str(self.name)
 
-class BaseException(Exception):
-	"""Base exception class for this module
+"""Some definitions used by the code
+"""
+QUOTES = "'", '"'
+BOOLEANS = "True", "False"
+PUSHTOKEN = "("
+POPTOKEN = ")"
+
+def convert(token):
+	"""This function takes a string token and converts it into a literal or reference.
+
+	Literals are their own values. Pretzyl uses bare None, True / False, strings and numbers to represent these values.
+
+	Tokens that cannot be converted as one of these, is encapsulated in a Reference instance,
+	so that the rest of Pretzyl will know that these should refer to named values in the environment.
 	"""
-	pass
+	if token == "None":
+		return None
+	if token in BOOLEANS:
+		return bool(token)
+	try:
+		if re.match(r"^-?0\d+$", token):
+			number = int(token[1:], 8) # octal
+		elif re.match(r"^-?0[xX][\da-fA-F]+$", token):
+			number = int(token[2:], 16) # hex
+		elif re.match(r"^-?\d+$", token):
+			number = int(token) # base-10
+		else:
+			number = float(token)
+		return number
+	except ValueError:
+		pass
+	if len(token) > 1:
+		quotes = token[0], token[-1]
+		if quotes[0] == quotes[1] and quotes[0] in QUOTES:
+			# must be a string
+			return token[1:-1]
+	# must be a reference
+	return Reference(token)
 
-class RecursionOverflow(BaseException):
-	"""Recursion overflow
+def tokenize(line, macros = None):
+	"""This method attempts tokenize and translate an input line of program code.
 
-	This exception is raised when the stack depth exceeds the STACKDEPTH limit, ie. there 
-	are too may heirarchical open brackets in the program
+	If macros is a dictionary of translations, it is applied after the initial
+	tokenization to expand any macros in the line.
+	
+	The result will be a list of literals / references.
 	"""
-	pass
-
-class NestingException(BaseException):
-	"""Nesting exception
-
-	This is raised when there are mismatched brackets in the program. Either one too many
-	closing brackets, or too few closing brackets.
-	In either case, the number and nesting of brackets do not match.
-	This is a syntax error in the program.
-	"""
-	pass
-
-class StackUnderflow(BaseException):
-	"""Stack underflow
-
-	Raised by the interpreter when an operation attempts to pop more values
-	off the stack than are currently available.
-	"""
-	pass
-
-class StackOverflow(BaseException):
-	"""Stack overflow
-
-	Raised by the interpreter when an operation attempts to push more values
-	onto the stack than are currently allowed.
-	"""
-	pass
-
-class IterationOverflow(BaseException):
-	"""Iteration overflow
-
-	Raised by the interpreter when a modified inf repeat operation does not terminate
-	before the expected number of iterations.
-	"""
-	pass
-
-class InvalidReference(BaseException):
-	"""Invalid reference token lookup
-	"""
-	pass
-
-
-class MalformedOperator(BaseException):
-	"""Operator syntax error
-
-	This is an internal exception that is used during operator parsing, to indicate
-	that the operator (specifically, its modifier) is malformed, and that the 
-	operator should be treated as a regular reference instead.
-	"""
-	pass
+	if macros is None:
+		# no macro lookup, just convert each token in the line
+		return [convert(token) for token in tokenyze.gettokens(line)]
+	# do macro expansion
+	tokenlist = []
+	for token in tokenyze.gettokens(line):
+		if token in macros:
+			# if the token is a macro, tokenize its macro expansion and convert each resulting token
+			tokenlist.extend([convert(token) for token in tokenyze.gettokens(macros[token])])
+		else:
+			# convert the non-macro token
+			tokenlist.append(convert(token))
+	return tokenlist
 
 
 #######################################################################
 # Default operators
 
+import functools
+import math
 
-class _DefaultOperators:
-	"""Default operator set
+class Operator:
+	"""User-derived classes that want to implement operators should derive from this base class.
 
-	This is a utility class that contains a bunch of useful default operators.
+	Operator classes should implement
+		def __call__(self, P)
+	which takes a Pretzyl parser as argument when called during program execution.
+	An operator class should be registered in the environment passed to the parser, in order to be available
+	when a program invokes it using its reference name.
+	"""
+	def __init__(self):
+		pass
+
+class makeBareOperator:
+	"""A decorator that creates a bare operator from a function that accepts a Pretzyl parser during invocation.
+	The decorator handles popping of tokens off the stack, as well as lookup.
+	The bare operator needs to all other interaction with the stack, including pushing values if required.
+
 	"""
 
-	# TODO: clean up the logging instructions to something more sane.
+	def __init__(self, argc = 1, lookup = False):
+		self.lookup = lookup
+		self.argc = argc
 
-	def isset(self, P):
-		"""Tests whether a token is a valid reference to an entry in the environment.
-		[a is in env]
-		unary(n -> n')
-		"""
-		a = P.pop(lookup = False)
-		c = P.validref(a)
-		P.push(c)
-	
-	def greaterthan(self, P):
-		"""Tests whether two tokens follow the greater-than ordering
-		[a >= b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a > b
-		P.push(c)
-	
-	def lessthan(self, P):
-		"""Tests whether two tokens follow the less-than ordering
-		[a < b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a < b
-		P.push(c)
+	def __call__(self, function):
+		@functools.wraps(function)
+		def wrapper(P):
+			log("makeBareOperator: popping %i args from stack depth %i" % (self.argc, P.depth()))
+			argv = P.pop(self.argc, self.lookup)
+			#try:
+			if 1:
+				if self.argc == 0:
+					out = function(P)
+				elif self.argc == 1:
+					out = function(P, argv)
+				else:
+					out = function(P, *argv)
+			#except IterationOverflow as e:
+			#	raise
+			# The following will squash everything into an ExecutionError...
+			#except Exception as e:
+			#	raise ExecutionException(e, "\n\terror applying operator [%s]" % function), None, sys.exc_info()[2]
+		# the 'pretzyloperator' attribute allows Pretzyl to determine that this object is a valid pretzyl operator
+		wrapper.pretzyloperator = True
+		return wrapper
 
-	def contains(self, P):
-		"""Tests whether a token is not None, in the succeeding (collection) token
-		[a in b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a is not None and b in a
-		P.push(c)
-	
-	def equals(self, P):
-		"""Tests whether two tokens evaluate to the same content
-		[a == b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a == b
-		P.push(c)
+class makeOperator:
+	"""A decorator that creates a simple operator that is provided its arguments from the stack.
+	The return value is pushed back onto the stack
+	By default, all requested arguments are looked up in the environment.
 
-	def greaterequal(self, P):
-		"""Tests whether two tokens follow the greater-or-equal ordering
-		[a >= b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a >= b
-		P.push(c)
+	"""
 
-	def invert(self, P):
-		"""Inverts the logical value of a token
-		[not a]
-		unary(n -> n')
-		"""
-		a = P.pop()
-		c = not a
-		log(a, "not =>", c)
-		P.push(c)
-	
-	def and_(self, P):
-		"""Tests whether two tokens both evaluate to true
-		This is a short-circuiting test, if the first token is false the second is not evaluated.
-		[a and b]
-		binary(m,n -> n')
-		"""
-		b, a = P.pop(2, lookup = False)
-		c = P.lookup(b) if P.lookup(a) else False
-		P.push(c)
-	
-	def or_(self, P):
-		"""Tests whether one of two tokens evaluates to true
-		This is a short-circuiting test, if the first token is true the second is not evaluated.
-		[a or b]
-		binary(m,n -> n')
-		"""
-		b, a = P.pop(2, lookup = False)
-		c =  P.lookup(b) if not P.lookup(a) else True
-		P.push(c)
-	
-	def strftime(self, P):
-		"""Applies the strftime method in the first token to the second token.
-		[a.strftime(b)]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a.strftime(b)
-		P.push(c)
-	
-	def truncate(self, P):
-		"""Converts a token into words, and selectes the first N of these
-		[trancatewords(a)]
-		unary(n -> n')
-		"""
-		words = 25
-		a = P.pop()
-		"""Remove tags and truncate text to the specified number of words."""
-		c = ' '.join(re.sub('(?s)<.*?>', ' ', a).split()[:words])
-		P.push(c)
-	
-	def pathjoin(self, P):
-		"""Joins two words together using the '/' separator
-		This functions like os.path.join:
-		- if the first token is empty, the second token is returned unchanged.
-		- if the second token is empty, the first is returned with a trailing separator
-		[os.path.join(a, b)]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = b if len(a) == 0 else a + "/" + b
-		P.push(c)
+	def __init__(self, argc = 1, lookup = True):
+		self.lookup = lookup
+		self.argc = argc
 
-	def toreference(self, P):
-		"""Creates a reference with a name from a literal
-		[Reference(a)]
-		unary(n -> n')
-		"""
-		a = P.pop()
-		c = Reference(a)
-		P.push(c)
-
-	def multiply(self, P):
-		"""Multiplies two tokens
-		[a * b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a * b
-		P.push(c)
-
-	def add(self, P):
-		"""Adds two tokens
-		[a + b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a + b
-		P.push(c)
-
-	def subtract(self, P):
-		"""Adds two tokens
-		[a - b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a - b
-		P.push(c)
-
-	def divide(self, P):
-		"""Divides two tokens
-		[a / b]
-		binary(m,n -> n')
-		"""
-		a, b = P.pop(2)
-		c = a / b
-		P.push(c)
+	def __call__(self, function):
+		@functools.wraps(function)
+		def wrapper(P):
+			log("makeOperator: popping %i args from stack depth %i" % (self.argc, P.depth()))
+			argv = P.pop(self.argc, self.lookup)
+			#try:
+			if 1:
+				if self.argc == 0:
+					out = function()
+				elif self.argc == 1:
+					out = function(argv)
+				else:
+					out = function(*argv)
+			#except IterationOverflow as e:
+			#	raise
+			# The following will squash everything into an ExecutionError...
+			#except Exception as e:
+			#	raise ExecutionException(e, "\n\terror applying operator [%s]" % function), None, sys.exc_info()[2]
+			P.push(out)
+		# the 'pretzyloperator' attribute allows Pretzyl to determine that this object is a valid pretzyl operator
+		wrapper.pretzyloperator = True
+		return wrapper
 
 
-_DefaultOperatorSet = _DefaultOperators()
+# The following declares a number of operators that are available by default in Pretyl.
+# Most of them are self-explanatory.
+
+# Note that some operators will push something other than a number, string or boolean onto the stack.
+# In fact, almost any python structure is acceptable, if the next operator that comes along can operate on it.
+# 
+# Sometimes we will get a "TypeError: object of type 'generator' has no len()" exception when 
+# applying eg. a "length" operator to an object. This might be because the object in question
+# was made with "groupby" or "enumerate", which produce generators (which have no __len__).
+# Since we don't have Exception Chaining in Python 2.7 it is pretty hard to catch these 
+# errors at their source. Ergo, this note. Hope it helps...
+
+
+@makeBareOperator(1)
+def isset(P, a):
+	"""Checks whether a token is a valid reference to an object in the environment.
+	"""
+	P.push(P.validref(a))
+
+@makeOperator(2)
+def greaterthan(a, b):
+	return a > b
+
+@makeOperator(2)
+def lessthan(a, b):
+	return a < b
+
+@makeOperator(2)
+def contains(a, b):
+	return a is not None and b in a
+
+@makeOperator(2)
+def equals(a, b):
+	return a == b
+
+@makeOperator(2)
+def greaterequal(a, b):
+	return a >= b
+
+@makeOperator(1)
+def invert(a):
+	return not a
+
+@makeBareOperator(2)
+def and_(P, a, b):
+	"""Short-circuit 'and' operator.
+	The second argument is not looked up if the first argument evaluates to False
+	"""
+	P.push(P.lookup(b) if P.lookup(a) else False)
+
+@makeBareOperator(2)
+def or_(P, a, b):
+	"""Short-circuit 'or' operator.
+	The second argument is not looked up if the first argument evaluates to True
+	"""
+	P.push(P.lookup(b) if not P.lookup(a) else True)
+
+@makeOperator(2)
+def strftime(date, format):
+	return date.strftime(format)
+
+@makeOperator(2)
+def truncate(text, words):
+	"""Truncates a piece of html text at the required number of words
+	"""
+	return ' '.join(re.sub('(?s)<.*?>', ' ', text).split()[:words])
+
+@makeOperator(2)
+def pathjoin(a, b):
+	return os.path.join(a, b)
+	#return b if len(a) == 0 else a + "/" + b
+
+@makeOperator(1)
+def toreference(literal):
+	"""Uses a string to create a reference.
+	This is useful when the name of a reference needs to be constructed at runtime
+	"""
+	return Reference(literal)
+
+@makeOperator(2)
+def multiply(a, b):
+	return a * b
+
+@makeOperator(2)
+def add(a, b):
+	return a + b
+
+@makeOperator(2)
+def subtract(a, b):
+	return a - b
+
+@makeOperator(2)
+def divide(a, b):
+	"""Floating point division.
+	The result should be converted to an integer if required
+	"""
+	return float(a) / b
+
+@makeOperator(1)
+def ceil(a):
+	return math.ceil(a)
+
+@makeOperator(1)
+def floor(a):
+	return math.floor(a)
+
+@makeOperator(1)
+def range_(count):
+	"""Returns range(count).
+	Note: range is a generator, so using something like "length" on the result of this operator
+	will fail hard
+	"""
+	return range(int(count))
+
+@makeOperator(1)
+def int_(a):
+	return int(a)
+
+@makeOperator(1)
+def str_(a):
+	return str(a)
+
+@makeOperator(1)
+def enumerate_(list):
+	"""Returns enumerate(list).
+	Note: enumerate is a generator, so using something like "length" on the result of this operator
+	will fail hard
+	"""
+	return enumerate(list)
+
+@makeOperator(1)
+def length_(a):
+	return len(a)
+
+@makeOperator(2)
+def at_(a, index):
+	return a[index]
+
+@makeOperator(3)
+def slice_(a, start, end):
+	if start is None:
+		return a[:end]
+	if end is None:
+		return a[start:]
+	return a[start:end]
+
+@makeOperator(2)
+def groupby(a, groupsize):
+	"""Breaks a list of items into groups of groupsize.
+	The last group will contain the remaainder.
+	For example "(1 2 3 4 5 6 7 8) 3 groupby"
+	will return [[1, 2, 3], [4, 5, 6], [7, 8]]
+	Note: this returns a generator, so using something like "length" on the result of this operator
+	will fail hard.
+	"""
+	return (a[i:i + groupsize] for i in range(0, len(a), groupsize))
+
+@makeOperator(3)
+def choose(first, second, predicate):
+	"""Chooses between first and second based on the boolean value of third
+	ie. third ? first : second
+	"""
+	return first if predicate else second
+
+@makeOperator(2)
+def startswith(value, start):
+	return value.startswith(start)
+
+@makeOperator(2)
+def endswith(value, end):
+	return value.endswith(end)
+
+@makeOperator(2)
+def paths(a, depth):
+	return a.paths(depth)
+
+@makeOperator(1)
+def iteritems(a):
+	"""Note: returns a generator. Applying "length" to this object will result in a hard fail
+	"""
+	return a.iteritems()
+
+@makeBareOperator(0)
+def dup(P):
+	"""Duplicates the top token on the stack without looking up its value
+	"""
+	P.push(P.peek())
+
+@makeOperator(2)
+def pow_(a, b):
+	return a ** b
+
+## The following are Modifiers
+
+@makeBareOperator(0)
+def squash(P):
+	"""Squash will repeat the last operator until there are not enough items on the stack.
+	The upper limit of execution is INFLIMIT.
+	"""
+	try:
+		for i in range(P.INFLIMIT):
+			log("squash: running op", P.lastop, "on stacksize:", len(P.stacks[-1]))
+			P.lastop(P)
+		else:
+			raise IterationOverflow("iteration overflow on loop %i using operator squash on [%s]" % (i, P.lastop))
+	except StackUnderflow as e:
+		pass
+
+@makeBareOperator(1)
+def times(P, a):
+	"""Times will repeat the last operator N-1 number of times, so that the last operator
+	gets repeated N times in total.
+	It fails if we run out of stack space or exceed the iteration limit.
+	"""
+	assert(a > 0)
+	if a > P.INFLIMIT:
+		raise IterationOverflow("iteration overflow using operator times(%i) on [%s]" % (a, P.lastop))
+	for i in range(a - 1): # since we are repeating an operation, we have already done this once
+		P.lastop(P)
+
+# A handy dictionary of the default operators.
 
 DefaultOperators = {
-	'exists'		: _DefaultOperatorSet.isset,
-	'>'				: _DefaultOperatorSet.greaterthan,
-	'<'				: _DefaultOperatorSet.lessthan,
-	'contains' 		: _DefaultOperatorSet.contains,
-	'==' 			: _DefaultOperatorSet.equals,
-	'>='			: _DefaultOperatorSet.greaterequal,
-	'!' 			: _DefaultOperatorSet.invert,
-	'and' 			: _DefaultOperatorSet.and_,
-	'or' 			: _DefaultOperatorSet.or_,
-	'strftime'  	: _DefaultOperatorSet.strftime,
-	'truncate'		: _DefaultOperatorSet.truncate,
-	'pathjoin' 		: _DefaultOperatorSet.pathjoin,
-	'~' 			: _DefaultOperatorSet.toreference,
-	'*' 			: _DefaultOperatorSet.multiply,
-	'+' 			: _DefaultOperatorSet.add,
-	'-' 			: _DefaultOperatorSet.subtract,
-	'/' 			: _DefaultOperatorSet.divide,
+	'exists'		: isset,
+	'gt'			: greaterthan,
+	'lt'			: lessthan,
+	'contains' 		: contains,
+	'eq' 			: equals,
+	'ge'			: greaterequal,
+	'not' 			: invert,
+	'and' 			: and_,
+	'or' 			: or_,
+	'strftime'  	: strftime,
+	'truncate'		: truncate,
+	'pathjoin' 		: pathjoin,
+	'makeref' 		: toreference,
+	'mul' 			: multiply,
+	'add' 			: add,
+	'subtract' 		: subtract,
+	'div' 			: divide,
+	'ceil' 			: ceil,
+	'floor'			: floor,
+	'range' 		: range_,
+	'int' 			: int_,
+	'str' 			: str_,
+	'enumerate' 	: enumerate_,
+	'length' 		: length_,
+	'at' 			: at_,
+	'slice' 		: slice_,
+	'groupby' 		: groupby,
+	'choose' 		: choose,
+	'startswith' 	: startswith,
+	'endswith' 		: endswith,
+	'paths' 		: paths,
+	'iteritems' 	: iteritems,
+	'dup'			: dup,
+	'pow' 			: pow_,
+	# modifiers of the last operator
+	'squash'		: squash,
+	'times'			: times,
 }
 
+# A handy dictionary of macro symbols.
+
+MacroSymbols = {
+	'>': 	'gt',
+	'<':	'lt',
+	'==':	'eq',
+	'>=':	'ge',
+	'!':	'not',
+	'&': 	'and',
+	'|': 	'or',
+	'~': 	'makeref',
+	'*': 	'mul',
+	'+': 	'add',
+	'-': 	'sub',
+	'/': 	'div',
+	'^': 	'ceil',
+	'_': 	'floor',
+	'<>': 	'at',
+	'||': 	'length',
+	'[]': 	'slice',
+	'{}': 	'groupby',
+	'?': 	'choose',
+	'?]': 	'startswith',
+	'[?': 	'endswith',
+	'//': 	'paths',
+	'@': 	'iteritems',
+	'$': 	'squash',
+	'sum': 	'add squash',
+	'prod': 'mul squash',
+	'any': 	'or squash',
+	'all': 	'and squash',
+	'//+': 	'pathjoin squash',
+	'/+': 	'pathjoin',
+	'**': 	'pow',
+	'*2': 	'2 pow',
+}
 
 ###############################################################################
 # The Pretzyl class
@@ -374,21 +504,28 @@ class Pretzyl:
 	with which operators can interact using the stack.
 	"""
 
-	QUOTES = "'", '"'
-	BOOLEANS = "True", "False"
-	PUSHTOKEN = "("
-	POPTOKEN = ")"
-
 	STACKLIMIT = 256
 	STACKDEPTH = 10
 	INFLIMIT = 256 # set to float('Inf') for no limit
 
-	def __init__(self, environment, operators = DefaultOperators):
+	def __init__(self, environment = {}, operators = DefaultOperators, operatorpath = None, macros = MacroSymbols):
 		self.env = environment
-		self.ops = operators
-		self.modifiers = {
-			"*": self.modifier_repeat,
-		}
+		self.operatorpath = operatorpath
+		self.macros = macros if macros is not None else {}
+		self.operatorpath = operatorpath
+		if operatorpath is None:
+			self.env.update(operators)
+		else:
+			# this assumes that self.env has an update that takes a path
+			self.env.update(operators, self.operatorpath)
+
+	def getopenv(self):
+		"""Returns the part of the environment where operators can be found
+		"""
+		if self.operatorpath is None:
+			return self.env
+		else:
+			return self.env[self.operatorpath]
 
 	def validref(self, token):
 		"""Checks whether a token is a valid reference in the environment
@@ -396,21 +533,33 @@ class Pretzyl:
 		return isinstance(token, Reference) and token.name in self.env
 
 	def lookup(self, token):
-		"""Returns the value of a token in the environment
-		If the token is a literal, its value is returned
+		"""Resolves the value of a token.
+		Reference tokens refer to objects in the environment. If a reference refers
+		to a non-existent object, an InvalidReference exception is raised.
+		Literal tokens are their own value.
 		"""
 		if isinstance(token, Reference):
 			try:
 				return self.env[token.name]
 			except KeyError as e:
-				raise InvalidReference
+				raise InvalidReference("token with name [%s] not found" % token.name)
 		return token
 
 	def checkstack(self, minsize):
-		"""Checks whether the stack as at least the required minsize length
+		"""Checks whether the stack has (at least) the required minsize length
 		"""
-		if len(self.stacks[-1]) < minsize:
-			raise StackUnderflow
+		if self.depth() < minsize:
+			raise StackUnderflow("stack depth %i is shallower than required %i" % (self.depth(), minsize))
+
+	def peek(self, count = 1, lookup = True):
+		"""Returns the specified number of tokens from the top of the stack, without popping them.
+		If lookup is specified, reference tokens are resolved in the environment and their objects returned.
+		"""
+		self.checkstack(count)
+		items = self.stacks[-1][-count:]
+		if lookup:
+			items = [self.lookup(item) for item in items]
+		return items[0] if len(items) == 1 else items if len(items) > 1 else None
 
 	def pop(self, count = 1, lookup = True):
 		"""Returns the top count tokens in the stack
@@ -418,14 +567,21 @@ class Pretzyl:
 		They are returned in FIFO order, and if lookup is True,
 		their values in the environment are looked up. 
 		"""
-		self.checkstack(count)
-		if count > 0:
-			# chop the last count items off the stack
-			self.stacks[-1], items = self.stacks[-1][:-count], self.stacks[-1][-count:]
-			assert(len(items) == count)
-		else:
-			# remove all items from the stack
+		if count is None:
+			# return eveything:
 			self.stacks[-1], items = [], self.stacks[-1]
+		else:
+			self.checkstack(count)
+			if count > 0:
+				# chop the last count items off the stack
+				self.stacks[-1], items = self.stacks[-1][:-count], self.stacks[-1][-count:]
+				assert(len(items) == count)
+			else:
+				# nothing to do, return None
+				return None
+				# remove all items from the stack
+				#self.stacks[-1], items = [], self.stacks[-1]
+			assert(len(items) == count)
 		# do lookup, if required
 		if lookup:
 			items = [self.lookup(item) for item in items]
@@ -435,9 +591,14 @@ class Pretzyl:
 	def push(self, value):
 		"""Pushes a token onto the topmost stack
 		"""
-		if len(self.stacks[-1]) + 1 > self.STACKLIMIT:
-			raise StackOverflow
+		if self.depth() + 1 > self.STACKLIMIT:
+			raise StackOverflow("stack overflow, stack depth %i exceeds STACKLIMIT %i" % (self.depth(), self.STACKLIMIT))
 		self.stacks[-1].append(value)
+
+	def depth(self):
+		"""Retuens the depth of the topmost stack
+		"""
+		return len(self.stacks[-1])
 
 	def pushstack(self):
 		"""Adds a stack to the heap of stacks
@@ -445,7 +606,7 @@ class Pretzyl:
 		This is done when an opening bracket token is found.
 		"""
 		if len(self.stacks) + 1 > self.STACKDEPTH:
-			raise RecursionOverflow
+			raise RecursionOverflow("recursion overflow, stacks size %i exceeds STACKDEPTH %i" % (len(self.stacks), self.STACKDEPTH))
 		self.stacks.append([])
 
 	def popstack(self):
@@ -454,7 +615,7 @@ class Pretzyl:
 		This is done when an closing bracket token is found.
 		"""
 		if len(self.stacks) == 1:
-			raise NestingException
+			raise NestingException("cannot pop last stack")
 		laststack = self.stacks.pop()
 		if len(laststack) == 1:
 			self.push(laststack[0])
@@ -463,111 +624,39 @@ class Pretzyl:
 		else:
 			pass
 
-	def modifier_repeat(self, operator, arg):
-		"""This modifier will repeat the given operator a number of times.
-		If arg is a number, the operator is repeated that many times.
-		If arg is empty, the operator is repeated until 
-		- the stack is empty,
-		- the stack overflows, or 
-		- the iteration limit is reached.
-		The first is a successful (and expected) outcome.
-		The last two are failures in the program code.
-		"""
-		if len(arg) == 0:
-			log("modifier_repeat: inf")
-			stacksize = len(self.stacks[-1])
-			log("stacksize: ", stacksize)
-			i = 0
-			while True:
-				if i > self.INFLIMIT:
-					# To prevent possibly infinite repetition of the
-					# inf modifier, we limit it to INFLIMIT iterations.
-					# If we hit this iteration limit without collapsing
-					# the stack, this is an error.
-					raise IterationOverflow
-				i += 1
-				try:
-					operator(self)
-				except StackUnderflow as e:
-					# In this case (inf repeat modifier) we expect the 
-					# operator to eventually starve the stack, so this is 
-					# treated as an expected situation.
-					break
-				assert(len(self.stacks[-1]) < stacksize)
-				stacksize = len(self.stacks[-1])
-				log("new stacksize: ", stacksize)
-		else:
-			try:
-				times = int(arg)
-			except ValueError:
-				raise MalformedOperator
-			log("modifier_repeat: ", times)
-			log("stack: ", len(self.stacks[-1]), self.stacks[-1])
-			for i in range(times):
-				log("modifier_repeat: iteration", i)
-				log("stack: ", len(self.stacks[-1]), self.stacks[-1])
-				operator(self)
-
 	def makeoperator(self, token):
 		"""This method attempts to make an operator (possibly with modifier) out of a token
 		If succesful, the operator(+modifier) is executed, and the method returns True.
 		Otherwise, the method returns False.
 		"""
+		log("makeoperator[%s]:" % token)
 		if not isinstance(token, Reference):
 			# simply return false, this is not a reference
+			log("-> not a reference")
 			return False
-		for name in self.ops.keys():
-			if token.name.find(name) == 0:
-				opname, modifier = token.name[:len(name)], token.name[len(name):]
-				operator = self.ops[opname]
-				break
+		openv = self.getopenv()
+		if token.name in openv:
+			obj = openv[token.name]
 		else:
-			# no matching operator found, might be something else
 			return False
-		log("makeoperator: operator: ", operator, " modifier:", modifier)
-		if len(modifier) == 0:
-			operator(self)
-			return True
-		else:
-			# might still be a valid reference (other than an operator!)
-			modsym 	= modifier[0]
-			arg 	= modifier[1:]
-			if modsym in self.modifiers:
-				mod = self.modifiers[modsym]
-				try:
-					mod(operator, arg)
-					return True
-				except MalformedOperator as e:
-					pass
-		return False
-
-	def tokenize(self, line):
-		"""This method attempts tokenize an input line of program code.
-		The line must contain a complete program.
-		"""
-		def convert(token):
-			if token in self.BOOLEANS:
-				return bool(token)
-			try:
-				number = float(token)
-				return number
-			except ValueError:
-				pass
-			if len(token) > 1:
-				quotes = token[0], token[-1]
-				if quotes[0] == quotes[1] and quotes[0] in self.QUOTES:
-					# must be a string
-					return token[1:-1]
-			# must be a reference
-			return Reference(token)
-		items = shlex.split(line, posix=False)
-		tokens = []
-		for item in items:
-			# split the item on "(" and ")"
-			tokens.extend([i for i in re.split(r"([\(\)])", item) if len(i) > 0])
-		tokens = [convert(item) for item in tokens]
-		#pdb.set_trace()
-		return tokens
+		try:
+			if isinstance(obj, Operator):
+				log("-> found Operator")
+			elif 'pretzyloperator' in obj.__dict__ and obj.__dict__['pretzyloperator']:
+				log("-> found wrapped operator function")
+			else:
+				log("-> not an Operator or wrapped operator function")
+				return False
+		except AttributeError as e:
+			log("-> error accessing attributes, discarding operator")
+			return False
+		# At this point, the object should be an operator.
+		operator = obj
+		log("running operator [%s], last operator is [%s]" % (operator, self.lastop))
+		# pass our environment to the operator for evaluation.
+		operator(self)
+		self.lastop = operator
+		return True
 
 	def eval(self, line, count = 1, lookup = True):
 		"""This method evaluates a complete program.
@@ -576,115 +665,114 @@ class Pretzyl:
 		"""
 		# each evaluation starts off with a new stack
 		self.stacks = [[]]
-		# parse the line into tokens
-		tokens = self.tokenize(line)
+		self.lastop = None
+		log("line is [%s]" % line)
+		# do macro symbol translation and tokenize the line:
+		tokens = tokenize(line, self.macros)
+		log("tokens are ", tokens)
 		tokens.reverse()
 		# evaluate one token at a time.
 		while len(tokens) > 0:
 			token = tokens.pop()
+			log("looking at token [%s], stack depth: %i" % (token, self.depth()))
 			if isinstance(token, Reference):
-				if token.name == self.PUSHTOKEN:
+				if token.name == PUSHTOKEN:
+					log("-> token is PUSHTOKEN")
 					# push a new input stack on top of the old stack
-					log("pre  pushing stacks:", self.stacks)
 					self.pushstack()
-					log("post pushing stacks:", self.stacks)
 					continue
-				elif token.name == self.POPTOKEN:
+				elif token.name == POPTOKEN:
+					log("-> token is POPTOKEN")
 					# pop the current stack, add its value to the next stack
-					log("pre  popping stacks:", self.stacks)
 					self.popstack()
-					log("post popping stacks:", self.stacks)
 					continue
-				elif self.makeoperator(token):
-					# if it is a reference to an operator, feed the stack to the operator (and grab the result)
-					continue
+				else:
+					if self.makeoperator(token):
+						continue
 			# otherwise push it onto the stack
+			log("-> token [%s] is a literal, adding to stack" % token)
 			self.push(token)
 		# we need to make sure our stackdepth is 1
 		if len(self.stacks) != 1:
 			# probably a syntax error: no matching closing bracket.
-			raise NestingException
+			raise NestingException("syntax error, missing closing bracket(s) for [%s]" % line)
 		return self.pop(count, lookup)
 
 
 #######################################################################
-# Some unit test code follows:
+### Exceptions
 
+class BaseException(Exception):
+	"""Base exception class for this module
+	"""
+	def __init__(self, message):
+		Exception.__init__(self)
 
-def test():
+class RecursionOverflow(BaseException):
+	"""Recursion overflow
 
-	env = {
-		'name': 'Jack',
-	}
+	This exception is raised when the stack depth exceeds the STACKDEPTH limit, ie. there 
+	are too may heirarchical open brackets in the program
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	p = Pretzyl(env)
+class NestingException(BaseException):
+	"""Nesting exception
 
-	d = p.eval("(2 2 2 +*) 4 *")
-	assert(d == 24)
+	This is raised when there are mismatched brackets in the program. Either one too many
+	closing brackets, or too few closing brackets.
+	In either case, the number and nesting of brackets do not match.
+	This is a syntax error in the program.
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	d = p.eval("   'hello [' name  ']!' +*2")
-	assert(d == "hello [Jack]!")
+class StackUnderflow(BaseException):
+	"""Stack underflow
 
-	d = p.eval("True")
-	assert(d == True)
+	Raised by the interpreter when an operation attempts to pop more values
+	off the stack than are currently available.
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	d = p.eval("5 4 <")
-	assert(d == False)
+class StackOverflow(BaseException):
+	"""Stack overflow
 
-	d = p.eval("4 5 <")
-	assert(d == True)
+	Raised by the interpreter when an operation attempts to push more values
+	onto the stack than are currently allowed.
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	d = p.eval("5 4 < !")
-	assert(d == True)
+class IterationOverflow(BaseException):
+	"""Iteration overflow
 
-	d = p.eval("5 4 >=")
-	assert(d == True)
+	Raised by the interpreter when a modified inf repeat operation does not terminate
+	before the expected number of iterations.
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	d = p.eval("'name' ~")
-	assert(d == "Jack")
+class InvalidReference(BaseException):
+	"""Invalid reference token lookup
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	d = p.eval("2 2 2 2 **")
-	assert(d == 16)
+class MalformedOperator(BaseException):
+	"""Operator syntax error
 
-	def testException(Exc, op):
-		try:
-			p.eval(op)
-			assert(False)
-		except Exc as e:
-			pass
+	This is an internal exception that is used during operator parsing, to indicate
+	that the operator (specifically, its modifier) is malformed, and that the 
+	operator should be treated as a regular reference instead.
+	"""
+	def __init__(self, message):
+		BaseException.__init__(self, message)
 
-	testException(InvalidReference, "sammy")
+class ExecutionException(BaseException):
+	def __init__(self, exception, message):
+		message = repr(exception) + message
+		BaseException.__init__(self, message)
 
-	# these all look like operators, but they should
-	# be rejected since each one has a syntax error.
-	# This results in a lookup failure (ie. KeyError in the environment)
-	testException(InvalidReference, "2 2 *%")
-	testException(InvalidReference, "2 2 **x")
-	testException(InvalidReference, "2 2 ***")
-	testException(InvalidReference, "2 2 +#")
-	testException(InvalidReference, "2 2 ^")
-
-	# syntax errors - mismatched brackets
-	testException(NestingException, "( ( )")
-	testException(NestingException, "( ( ) ) )")
-
-	# the operator expects two arguments, but there is only one
-	testException(StackUnderflow, "highlander +")
-	p.STACKLIMIT = 10
-	testException(StackOverflow, "0 1 2 3 4 5 6 7 8 9 10")
-	p.STACKDEPTH = 5
-	testException(RecursionOverflow, "( ( ( ( ( ( ) ) ) ) ) )")
-	p.INFLIMIT = 5
-	testException(IterationOverflow, "0 1 2 3 4 5 6 **")
-
-	return 0
-
-if __name__ == "__main__":
-	import traceback
-	import pdb
-	try:
-		result = test()
-	except:
-		traceback.print_exc()
-		pdb.post_mortem()
-	sys.exit(result)
