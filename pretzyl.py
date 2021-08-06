@@ -9,7 +9,7 @@ import re
 import os
 
 #For internal debug use
-LOG = True
+LOG = False
 
 def log(*args, **kwargs):
 	"""For internal debug use
@@ -40,6 +40,14 @@ class Reference:
 
 	def __repr__(self):
 		return "Reference(%s)" % str(self.name)
+
+	def __eq__(self, other):
+		if isinstance(other, Reference):
+			return self.name == other.name
+		return False
+
+	def __ne__(self, other):
+		return not self.__eq__(other)
 
 """Some definitions used by the code
 """
@@ -80,26 +88,21 @@ def convert(token):
 	# must be a reference
 	return Reference(token)
 
-def tokenize(line, macros = None):
-	"""This method attempts tokenize and translate an input line of program code.
+def tokenize(line, macros, specialchars = ""):
+	"""This method attempts to tokenize and translate an input line of program code.
 
-	If macros is a dictionary of translations, it is applied after the initial
+	The macros is a dictionary of translations. It is applied after the initial
 	tokenization to expand any macros in the line.
-	
-	The result will be a list of literals / references.
 	"""
-	if macros is None:
-		# no macro lookup, just convert each token in the line
-		return [convert(token) for token in tokenyze.gettokens(line)]
-	# do macro expansion
+	log("tokenize line [%s] with specialchars [%s]" % (line, specialchars))
 	tokenlist = []
-	for token in tokenyze.gettokens(line):
+	for token in tokenyze.gettokens(line, specialchars):
 		if token in macros:
-			# if the token is a macro, tokenize its macro expansion and convert each resulting token
-			tokenlist.extend([convert(token) for token in tokenyze.gettokens(macros[token])])
+			# if the token is a macro, tokenize its macro expansion
+			tokenlist.extend([token for token in tokenyze.gettokens(macros[token], specialchars)])
 		else:
 			# convert the non-macro token
-			tokenlist.append(convert(token))
+			tokenlist.append(token)
 	return tokenlist
 
 
@@ -141,8 +144,6 @@ class makeBareOperator:
 			if 1:
 				if self.argc == 0:
 					out = function(P)
-				elif self.argc == 1:
-					out = function(P, argv)
 				else:
 					out = function(P, *argv)
 			#except IterationOverflow as e:
@@ -174,8 +175,6 @@ class makeOperator:
 			if 1:
 				if self.argc == 0:
 					out = function()
-				elif self.argc == 1:
-					out = function(argv)
 				else:
 					out = function(*argv)
 			#except IterationOverflow as e:
@@ -585,8 +584,7 @@ class Pretzyl:
 		# do lookup, if required
 		if lookup:
 			items = [self.lookup(item) for item in items]
-		# return 1, all or none
-		return items[0] if len(items) == 1 else items if len(items) > 1 else None
+		return items
 
 	def push(self, value):
 		"""Pushes a token onto the topmost stack
@@ -658,7 +656,11 @@ class Pretzyl:
 		self.lastop = operator
 		return True
 
-	def eval(self, line, count = 1, lookup = True):
+	def tokenize(self, line, specialchars = ""):
+		tokens = [convert(token) for token in tokenize(line, self.macros, specialchars = specialchars)]
+		return tokens
+
+	def evaltokens(self, tokens, count = 1, lookup = True):
 		"""This method evaluates a complete program.
 		It returns the count number of items from the bottom level stack, and looks
 		up their values in the environment if requested.
@@ -666,9 +668,6 @@ class Pretzyl:
 		# each evaluation starts off with a new stack
 		self.stacks = [[]]
 		self.lastop = None
-		log("line is [%s]" % line)
-		# do macro symbol translation and tokenize the line:
-		tokens = tokenize(line, self.macros)
 		log("tokens are ", tokens)
 		tokens.reverse()
 		# evaluate one token at a time.
@@ -695,8 +694,20 @@ class Pretzyl:
 		# we need to make sure our stackdepth is 1
 		if len(self.stacks) != 1:
 			# probably a syntax error: no matching closing bracket.
-			raise NestingException("syntax error, missing closing bracket(s) for [%s]" % line)
+			raise NestingException("syntax error, missing closing bracket(s) for [%s]" % tokens)
 		return self.pop(count, lookup)
+
+	def eval(self, line, count = 1, lookup = True):
+		"""This method evaluates a complete program.
+		It returns the count number of items from the bottom level stack, and looks
+		up their values in the environment if requested.
+		"""
+		if not isinstance(line, str):
+			# we expect a string here
+			raise RuntimeError("expected a string, found type %s instead: " % (type(line)), line)
+		# do macro symbol translation and tokenize the line:
+		tokens = self.tokenize(line)
+		return self.evaltokens(tokens, count, lookup)
 
 
 #######################################################################

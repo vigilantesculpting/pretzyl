@@ -114,14 +114,14 @@ def eatstring(nextchar, TEXT):
 			log("-return string: ", string, None)
 			return string, None
 
-def eatname(nextchar, TEXT):
+def eatname(specialchars, nextchar, TEXT):
 	"""name eater
 
 	This eats a name, until either a non-name character
 	is seen, or another token (brackets) starts.
 	"""
 	log("-eat name")
-	if nextchar in "()":
+	if nextchar in "()" + specialchars:
 		# hard return on bracket, and return the next character as an empty string.
 		return nextchar, ''
 	# start the new name with the new character
@@ -138,13 +138,13 @@ def eatname(nextchar, TEXT):
 		if nextchar == "\\":
 			nextchar = nextchar + TEXT.next()
 
-		if nextchar in " \t\n()'\"":
+		if nextchar in " \t\n()'\"" + specialchars:
 			log("-return name: ", name, nextchar)
 			return name, nextchar
 
 		name += nextchar[-1]
 
-def eattoken(nextchar, TEXT):
+def eattoken(specialchars, nextchar, TEXT):
 	"""token eater
 
 	This decides whether the next token will be a string or a name, depending
@@ -155,9 +155,9 @@ def eattoken(nextchar, TEXT):
 	if nextchar in ("'", '"'):
 		return eatstring(nextchar, TEXT)
 	else:
-		return eatname(nextchar, TEXT)
+		return eatname(specialchars, nextchar, TEXT)
 
-def gettokens(text):
+def gettokens(text, specialchars = ''):
 	"""gettokens is a generator that splits a text into tokens
 	"""
 
@@ -170,7 +170,7 @@ def gettokens(text):
 		# eat all following white space. Return the first non-whitespace character
 		nextchar = eatwhitespace(nextchar, TEXT)
 		# feed the look-ahead character to the token eater
-		token, nextchar = eattoken(nextchar, TEXT)
+		token, nextchar = eattoken(specialchars, nextchar, TEXT)
 		# we get the token and the next non-token character back
 		log("-yield token", token)
 		yield token
@@ -186,32 +186,50 @@ if __name__ == "__main__":
 
 	def test(string, expected):
 		log(string)
-		tokens = list(gettokens(string))
+		# add ":" as a specialchar
+		tokens = list(gettokens(string, ":"))
 		log(tokens)
 		assert(len(expected) == len(tokens))
 		assert(all([a == b for (a, b) in zip(tokens, expected)]))
 
 	try:
+		# simple test
 		test(
 			"hello world!",
 			['hello', 'world!']
 		)
 
+		# a bit more complex, we have brackets breaking up strings of text
 		test(
 			"fr33(the p1zza c@t)n0w_",
 			['fr33', '(', 'the', 'p1zza', 'c@t', ')', 'n0w_']
 		)
 
+		# string should be able to contain extra specialchars
+		test(
+			"fr33(the 'p1:zza' c@t)n0w_",
+			['fr33', '(', 'the', "'p1:zza'", 'c@t', ')', 'n0w_']
+		)
+
+		# check for extra specialchars
+		test(
+			"fr3:3(the p1zza c@t)n0w_",
+			['fr3', ':', '3', '(', 'the', 'p1zza', 'c@t', ')', 'n0w_']
+		)
+
+		# test escaped characters
 		test(
 			"eat(the\tchopper\n\\)boppers\ttoday",
 			['eat', '(', 'the', 'chopper', ')boppers', 'today']
 		)
 
+		# random nonsense
 		test(
 			"hello $ %_!\nwo('orld (r)\" '\"mole\")bl\tah(foo)(bar)\\(wack",
 			['hello', '$', '%_!', 'wo', '(', '\'orld (r)" \'', '"mole"', ')', 'bl', 'ah', '(', 'foo', ')', '(', 'bar', ')', '(wack']
 		)
 
+		# more random nonsense
 		test(
 			"hdcs43(operator*'230 lkcank 23245'\"dckjnkasd(sdclk)\"csdkk(kjk kjnkjn)(caskdjkj)( sdcklkldc)\")\"",
 			['hdcs43', '(', 'operator*', "'230 lkcank 23245'", '"dckjnkasd(sdclk)"', 'csdkk', '(', 'kjk', 'kjnkjn', ')', '(', 'caskdjkj', ')', '(', 'sdcklkldc', ')', '")"']
@@ -219,4 +237,4 @@ if __name__ == "__main__":
 
 	except:
 		traceback.print_exc()
-		pdb.set_trace()
+		pdb.post_mortem()

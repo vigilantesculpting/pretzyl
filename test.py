@@ -20,91 +20,90 @@ def test():
 
 	d = p.eval("('jack' 'suzy' 'mary') 2 <>")
 	print d
-	assert(d == "mary")
+	assert(d == ["mary"])
 
 	d = p.eval("('jack' 'suzy' 'mary') 1 None []")
 	d = list(d)
 	print d
-	assert(d == ['suzy', 'mary'])
+	assert(d == [['suzy', 'mary']])
 
-	pdb.set_trace()
 	# a simple arithmetic expression
 	d = p.eval("2 2 2 sum 4 *")
 	print d
-	assert(d == 24)
+	assert(d == [24])
 
 	# a nested arithmetic expression
 	d = p.eval("2 (2 2 sum) 4 *")
 	print d
-	assert(d == 16)
+	assert(d == [16])
 
 	# more arithmetic...
 	d = p.eval("4 *2")
 	print d
-	assert(d == 16)
+	assert(d == [16])
 
 	d = p.eval("4 4 **")
 	print d
-	assert(d == 256)
+	assert(d == [256])
 
 	# string manipulation
 	d = p.eval("   'hello [' name  ']!' + 2 times")
 	print d
-	assert(d == "hello [Jack]!")
+	assert(d == ["hello [Jack]!"])
 
 	# basic booleans
 	d = p.eval("True")
 	print d
-	assert(d == True)
+	assert(d == [True])
 
 	# more booleans
 	d = p.eval("5 4 <")
 	print d
-	assert(d == False)
+	assert(d == [False])
 
 	d = p.eval("4 5 <")
 	print d
-	assert(d == True)
+	assert(d == [True])
 
 	d = p.eval("5 4 < !")
 	print d
-	assert(d == True)
+	assert(d == [True])
 
 	d = p.eval("5 4 >=")
 	print d
-	assert(d == True)
+	assert(d == [True])
 
 	# create a ref from a string, this will evaluate it and look it up, then return the value
 	d = p.eval("'n' 'ame' + makeref")
 	print d
-	assert(d == "Jack")
+	assert(d == ["Jack"])
 
 	# squash
 	d = p.eval("2 2 2 2 * $")
 	print d
-	assert(d == 16)
+	assert(d == [16])
 
 	# return the stack as list
 	d = p.eval("(1 2 3)", None)
 	print d
-	assert(d == [1.0, 2.0, 3.0])
+	assert(d == [[1.0, 2.0, 3.0]])
 
 	# create a range, then return the stack as a list
 	d = p.eval("10 range", None)
 	print d
-	assert(d == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+	assert(d == [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]])
 
 	# groupby (and generator) test:
 	d = p.eval("(1 2 3 4 5 6 7 8) 3 {}")
 	# d will be a generator, so check the contents by converting it to a list
-	d = list(d)
+	d = list(d[0])
 	print d
 	assert(d == [[1, 2, 3], [4, 5, 6], [7, 8]])
 
 	# filename generation
 	d = p.eval("'static' 'css' ('site-' key '.html' sum) //+")
 	print d
-	assert(d == "static/css/site-a7c34bd.html")
+	assert(d == ["static/css/site-a7c34bd.html"])
 
 	# exception testing
 	def testException(Exc, op):
