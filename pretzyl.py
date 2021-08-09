@@ -52,7 +52,7 @@ class Reference:
 """Some definitions used by the code
 """
 QUOTES = "'", '"'
-BOOLEANS = "True", "False"
+BOOLEANS = {"True": True, "False": False}
 PUSHTOKEN = "("
 POPTOKEN = ")"
 
@@ -67,7 +67,7 @@ def convert(token):
 	if token == "None":
 		return None
 	if token in BOOLEANS:
-		return bool(token)
+		return BOOLEANS[token]
 	try:
 		if re.match(r"^-?0\d+$", token):
 			number = int(token[1:], 8) # octal
@@ -122,219 +122,164 @@ class Operator:
 	when a program invokes it using its reference name.
 	"""
 	def __init__(self):
+		self.pretzyloperator = True
 		pass
 
-class makeBareOperator:
-	"""A decorator that creates a bare operator from a function that accepts a Pretzyl parser during invocation.
-	The decorator handles popping of tokens off the stack, as well as lookup.
-	The bare operator needs to all other interaction with the stack, including pushing values if required.
+def MakeOperator(function, argc, argout = True, argextend = False, lookup = True, passenv = None):
+	"""This is the main operator factory function
 
+	It takes a number of parameters:
+	- function: the function to map to the pretzyl stack,
+	- argc: the number of items on the stack that are required to be able to feed the function,
+	- argout: whether the return value from the function should be pushed onto the stack,
+	- argextend: whether the return value from the function should extend the stack (rather than append to it),
+	- lookup: whether the items that are popped from the stack should be looked up in the environment before
+		being fed to the function, and
+	- passend: whether the function expects the pretzyl instance to be passed as a first argument.
+
+	The defaults are good for simple function arguments.
+	For example
+		MakeOperator(operator.add, 2)
+	will create a pretzyl operator that takes two values (looked up in the environment), adds them using
+	operator.add, and pushes the result to the stack.
+
+	More complicated functions use parameters that are not default.
+	For example, the 'exists' operator needs to know about the pretzyl environment, and its argument
+	should not be looked up since it may not exist:
+		MakeOperator(lambda P,a: P.validref(a), argc=1, lookup=False)
+
+	Another more complicated example is a short-circuit 'and' operator.
+	It needs to lookup the first parameter, but only needs to look up the second parameter if
+	the first evaluates to true. If not, it can safely skip the second parameter and return false:
+		MakeOperator(lambda P,a,b: P.lookup(b) if P.lookup(a) else False, argc=2, lookup=False)
+
+	If the argc argument is None, the entire stack is popped and passed to the function.
+	This is used by the 'enpack' operator, which pops the entire stack and returns it as a single list,
+		MakeOperator(lambda a: a, argc=None)
+
+	The 'unpack' operator, on the other hand, takes a single argument (a list), and uses the argextend=True
+	spec to extend the stack using the items in the list:
+		MakeOperator(lambda a: list(a), argc=1, argextend=True)
+
+	So for example, the repeat operator 
 	"""
+	if passenv is None:
+		# by default, if lookup is False, then passenv should be True and vice versa
+		passenv = not lookup
+	@functools.wraps(function)
+	def wrapper(P):
+		log("makeOperator: popping %s args from stack depth %i" % (argc, P.depth()))
+		argv = P.pop(argc, lookup)
+		if passenv:
+			if argc is None:
+				out = function(P, argv)
+			else:
+				out = function(P, *argv)
+		else:
+			if argc is None:
+				out = function(argv)
+			else:
+				out = function(*argv)
+		if argout:
+			if argextend:
+				P.extend(out)
+			else:
+				P.push(out)
+	wrapper.pretzyloperator = True
+	return wrapper
 
-	def __init__(self, argc = 1, lookup = False):
-		self.lookup = lookup
-		self.argc = argc
+# A couple of utility functions, where the operator definitions require a couple of lines
+# and lambdas or operator.* would not suffice
 
-	def __call__(self, function):
-		@functools.wraps(function)
-		def wrapper(P):
-			log("makeBareOperator: popping %i args from stack depth %i" % (self.argc, P.depth()))
-			argv = P.pop(self.argc, self.lookup)
-			#try:
-			if 1:
-				if self.argc == 0:
-					out = function(P)
-				else:
-					out = function(P, *argv)
-			#except IterationOverflow as e:
-			#	raise
-			# The following will squash everything into an ExecutionError...
-			#except Exception as e:
-			#	raise ExecutionException(e, "\n\terror applying operator [%s]" % function), None, sys.exc_info()[2]
-		# the 'pretzyloperator' attribute allows Pretzyl to determine that this object is a valid pretzyl operator
-		wrapper.pretzyloperator = True
-		return wrapper
-
-class makeOperator:
-	"""A decorator that creates a simple operator that is provided its arguments from the stack.
-	The return value is pushed back onto the stack
-	By default, all requested arguments are looked up in the environment.
-
+def makeop(P, a):
+	"""Creates a reference out of the argument, then resolves it in the environment and
+	attempts to apply it to the stack.
+	This is used to create and run functions on the fly from names, eg.
+		4 5 'sum'
+		> 9
 	"""
+	ref = P.lookup(Reference(a))
+	ref(P)
 
-	def __init__(self, argc = 1, lookup = True):
-		self.lookup = lookup
-		self.argc = argc
-
-	def __call__(self, function):
-		@functools.wraps(function)
-		def wrapper(P):
-			log("makeOperator: popping %i args from stack depth %i" % (self.argc, P.depth()))
-			argv = P.pop(self.argc, self.lookup)
-			#try:
-			if 1:
-				if self.argc == 0:
-					out = function()
-				else:
-					out = function(*argv)
-			#except IterationOverflow as e:
-			#	raise
-			# The following will squash everything into an ExecutionError...
-			#except Exception as e:
-			#	raise ExecutionException(e, "\n\terror applying operator [%s]" % function), None, sys.exc_info()[2]
-			P.push(out)
-		# the 'pretzyloperator' attribute allows Pretzyl to determine that this object is a valid pretzyl operator
-		wrapper.pretzyloperator = True
-		return wrapper
-
-
-# The following declares a number of operators that are available by default in Pretyl.
-# Most of them are self-explanatory.
-
-# Note that some operators will push something other than a number, string or boolean onto the stack.
-# In fact, almost any python structure is acceptable, if the next operator that comes along can operate on it.
-# 
-# Sometimes we will get a "TypeError: object of type 'generator' has no len()" exception when 
-# applying eg. a "length" operator to an object. This might be because the object in question
-# was made with "groupby" or "enumerate", which produce generators (which have no __len__).
-# Since we don't have Exception Chaining in Python 2.7 it is pretty hard to catch these 
-# errors at their source. Ergo, this note. Hope it helps...
-
-
-@makeBareOperator(1)
-def isset(P, a):
-	"""Checks whether a token is a valid reference to an object in the environment.
+def repeat(P, a):
+	"""Applies a named operator on the stack, until the stack is either too small or the iteration
+	limit has been exceeded.
+	This effectively reduces the stack, in the case where the operator produces less output than it takes in.
+	For example,
+		1 2 3 4 5 6 7 8 9 10 'add' repeat
+		> 55
 	"""
-	P.push(P.validref(a))
+	ref = P.lookup(Reference(a))
+	log("repeating operator %s:" % (a))
+	for i in range(P.INFLIMIT):
+		try:
+			ref(P)
+		except StackUnderflow as e:
+			log("swallowed StackUnderflow exception from operator %s on iteration %i" % (a, i))
+			return
+	else:
+		raise IterationOverflow("iteration limit exceeded in operator %s on iteration %i" % (a, i))
 
-@makeOperator(2)
-def greaterthan(a, b):
-	return a > b
-
-@makeOperator(2)
-def lessthan(a, b):
-	return a < b
-
-@makeOperator(2)
-def contains(a, b):
-	return a is not None and b in a
-
-@makeOperator(2)
-def equals(a, b):
-	return a == b
-
-@makeOperator(2)
-def greaterequal(a, b):
-	return a >= b
-
-@makeOperator(1)
-def invert(a):
-	return not a
-
-@makeBareOperator(2)
 def and_(P, a, b):
 	"""Short-circuit 'and' operator.
 	The second argument is not looked up if the first argument evaluates to False
 	"""
-	P.push(P.lookup(b) if P.lookup(a) else False)
+	return P.lookup(b) if P.lookup(a) else False
 
-@makeBareOperator(2)
 def or_(P, a, b):
 	"""Short-circuit 'or' operator.
 	The second argument is not looked up if the first argument evaluates to True
 	"""
-	P.push(P.lookup(b) if not P.lookup(a) else True)
+	return P.lookup(b) if not P.lookup(a) else True
 
-@makeOperator(2)
-def strftime(date, format):
-	return date.strftime(format)
-
-@makeOperator(2)
-def truncate(text, words):
+def truncate(text):
 	"""Truncates a piece of html text at the required number of words
 	"""
+	words = 25
 	return ' '.join(re.sub('(?s)<.*?>', ' ', text).split()[:words])
 
-@makeOperator(2)
-def pathjoin(a, b):
-	return os.path.join(a, b)
-	#return b if len(a) == 0 else a + "/" + b
-
-@makeOperator(1)
-def toreference(literal):
-	"""Uses a string to create a reference.
-	This is useful when the name of a reference needs to be constructed at runtime
+def _sum(list):
+	"""Adds the items of a list together.
+	If the list is empty, an empty list is returned.
 	"""
-	return Reference(literal)
+	if len(list) > 0:
+		if isinstance(list[0], str):
+			return ''.join(list)
+		return sum(list[1:], list[0])
+	else:
+		return []
 
-@makeOperator(2)
-def multiply(a, b):
-	return a * b
-
-@makeOperator(2)
-def add(a, b):
-	return a + b
-
-@makeOperator(2)
-def subtract(a, b):
-	return a - b
-
-@makeOperator(2)
-def divide(a, b):
-	"""Floating point division.
-	The result should be converted to an integer if required
+def strsum(list):
+	"""Converts each element in a list to a string, and returns all the concatenated strings
 	"""
-	return float(a) / b
+	return ''.join((str(s) for s in list))
 
-@makeOperator(1)
-def ceil(a):
-	return math.ceil(a)
-
-@makeOperator(1)
-def floor(a):
-	return math.floor(a)
-
-@makeOperator(1)
-def range_(count):
-	"""Returns range(count).
-	Note: range is a generator, so using something like "length" on the result of this operator
-	will fail hard
-	"""
-	return range(int(count))
-
-@makeOperator(1)
-def int_(a):
-	return int(a)
-
-@makeOperator(1)
-def str_(a):
-	return str(a)
-
-@makeOperator(1)
-def enumerate_(list):
-	"""Returns enumerate(list).
-	Note: enumerate is a generator, so using something like "length" on the result of this operator
-	will fail hard
-	"""
-	return enumerate(list)
-
-@makeOperator(1)
-def length_(a):
-	return len(a)
-
-@makeOperator(2)
-def at_(a, index):
-	return a[index]
-
-@makeOperator(3)
 def slice_(a, start, end):
+	"""Returns a slice of a parameter, a[start:end]
+	If start is None, it returns a[:end]
+	If end is None, it returns a[start:]
+	"""
 	if start is None:
 		return a[:end]
 	if end is None:
 		return a[start:]
 	return a[start:end]
 
-@makeOperator(2)
+def endslice(a, start):
+	"""Returns the start slice, up to start
+	"""
+	return a[start:]
+
+def startslice(a, end):
+	"""Returns the end slice, from end
+	"""
+	return a[:end]
+
+def splitat(a, index):
+	"""Splits a list into two pieces, at the index provided
+	"""
+	return a[:index], a[index:]
+
 def groupby(a, groupsize):
 	"""Breaks a list of items into groups of groupsize.
 	The last group will contain the remaainder.
@@ -345,146 +290,118 @@ def groupby(a, groupsize):
 	"""
 	return (a[i:i + groupsize] for i in range(0, len(a), groupsize))
 
-@makeOperator(3)
-def choose(first, second, predicate):
-	"""Chooses between first and second based on the boolean value of third
-	ie. third ? first : second
+def methodcaller(name):
+	"""Invokes the named method on an object, using the arguments provided
 	"""
-	return first if predicate else second
+	def methodcaller_(obj, *args, **kwargs):
+		op = operator.methodcaller(name, *args, **kwargs)
+		return op(obj)
+	return methodcaller_
 
-@makeOperator(2)
-def startswith(value, start):
-	return value.startswith(start)
-
-@makeOperator(2)
-def endswith(value, end):
-	return value.endswith(end)
-
-@makeOperator(2)
-def paths(a, depth):
-	return a.paths(depth)
-
-@makeOperator(1)
-def iteritems(a):
-	"""Note: returns a generator. Applying "length" to this object will result in a hard fail
-	"""
-	return a.iteritems()
-
-@makeBareOperator(0)
-def dup(P):
-	"""Duplicates the top token on the stack without looking up its value
-	"""
-	P.push(P.peek())
-
-@makeOperator(2)
-def pow_(a, b):
-	return a ** b
-
-## The following are Modifiers
-
-@makeBareOperator(0)
-def squash(P):
-	"""Squash will repeat the last operator until there are not enough items on the stack.
-	The upper limit of execution is INFLIMIT.
-	"""
-	try:
-		for i in range(P.INFLIMIT):
-			log("squash: running op", P.lastop, "on stacksize:", len(P.stacks[-1]))
-			P.lastop(P)
-		else:
-			raise IterationOverflow("iteration overflow on loop %i using operator squash on [%s]" % (i, P.lastop))
-	except StackUnderflow as e:
-		pass
-
-@makeBareOperator(1)
-def times(P, a):
-	"""Times will repeat the last operator N-1 number of times, so that the last operator
-	gets repeated N times in total.
-	It fails if we run out of stack space or exceed the iteration limit.
-	"""
-	assert(a > 0)
-	if a > P.INFLIMIT:
-		raise IterationOverflow("iteration overflow using operator times(%i) on [%s]" % (a, P.lastop))
-	for i in range(a - 1): # since we are repeating an operation, we have already done this once
-		P.lastop(P)
 
 # A handy dictionary of the default operators.
+# Note: Some of the operators will return generators, which may result in a 
+# 		"TypeError: object of type 'generator' has no len()"
+# exception when trying to apply eg. the "length" operator on the result.
+# Examples include 'enumerate', 'range', 'iteritmes' and 'groupby'
+
+import operator
 
 DefaultOperators = {
-	'exists'		: isset,
-	'gt'			: greaterthan,
-	'lt'			: lessthan,
-	'contains' 		: contains,
-	'eq' 			: equals,
-	'ge'			: greaterequal,
-	'not' 			: invert,
-	'and' 			: and_,
-	'or' 			: or_,
-	'strftime'  	: strftime,
-	'truncate'		: truncate,
-	'pathjoin' 		: pathjoin,
-	'makeref' 		: toreference,
-	'mul' 			: multiply,
-	'add' 			: add,
-	'subtract' 		: subtract,
-	'div' 			: divide,
-	'ceil' 			: ceil,
-	'floor'			: floor,
-	'range' 		: range_,
-	'int' 			: int_,
-	'str' 			: str_,
-	'enumerate' 	: enumerate_,
-	'length' 		: length_,
-	'at' 			: at_,
-	'slice' 		: slice_,
-	'groupby' 		: groupby,
-	'choose' 		: choose,
-	'startswith' 	: startswith,
-	'endswith' 		: endswith,
-	'paths' 		: paths,
-	'iteritems' 	: iteritems,
-	'dup'			: dup,
-	'pow' 			: pow_,
-	# modifiers of the last operator
-	'squash'		: squash,
-	'times'			: times,
+	'exists'		: MakeOperator(lambda P,a: P.validref(a), argc=1, lookup=False),
+	'not' 			: MakeOperator(operator.not_, argc=1),
+	'isnone'		: MakeOperator(lambda a: a is None, argc=1),
+	'makeref' 		: MakeOperator(Reference, argc=1),
+	'makeop' 		: MakeOperator(makeop, argc=1, argout=False, passenv=True),
+	'length' 		: MakeOperator(len, argc=1),
+	'dup'			: MakeOperator(lambda P:P.peek(), argc=0, lookup=False),
+	'unpack' 		: MakeOperator(lambda a: list(a), argc=1, argextend=True),
+	'enpack' 		: MakeOperator(lambda a: a, argc=None),
+	'int' 			: MakeOperator(int, argc=1),
+	'str' 			: MakeOperator(str, argc=1),
+
+	'enumerate' 	: MakeOperator(enumerate, argc=1),
+	'range' 		: MakeOperator(range, argc=1),
+	'iteritems' 	: MakeOperator(methodcaller('iteritems'), argc=1),
+
+	'ceil' 			: MakeOperator(math.ceil, argc=1),
+	'floor'			: MakeOperator(math.floor, argc=1),
+
+	'gt'			: MakeOperator(operator.gt, argc=2),
+	'lt'			: MakeOperator(operator.lt, argc=2),
+	'eq' 			: MakeOperator(operator.eq, argc=2),
+	'ge'			: MakeOperator(operator.ge, argc=2),
+	'and' 			: MakeOperator(and_, argc=2, lookup=False),
+	'or' 			: MakeOperator(or_, argc=2, lookup=False),
+	'mul' 			: MakeOperator(operator.mul, argc=2),
+	'add' 			: MakeOperator(operator.add, argc=2),
+	'sub' 			: MakeOperator(operator.sub, argc=2),
+	'div' 			: MakeOperator(operator.div, argc=2),
+	'pow' 			: MakeOperator(operator.pow, argc=2),
+
+	'at' 			: MakeOperator(operator.getitem, argc=2),
+	'contains' 		: MakeOperator(operator.contains, argc=2),
+
+	'startswith' 	: MakeOperator(methodcaller('startswith'), argc=2),
+	'endswith' 		: MakeOperator(methodcaller('endswith'), argc=2),
+	'paths' 		: MakeOperator(methodcaller('paths'), argc=2),
+	'strftime'  	: MakeOperator(methodcaller('strftime'), argc=2),
+
+	'pathjoin' 		: MakeOperator(os.path.join, argc=2),
+	'groupby' 		: MakeOperator(groupby, argc=2),
+	'startslice' 	: MakeOperator(startslice, argc=2),
+	'endslice' 		: MakeOperator(endslice, argc=2),
+	'splitat' 		: MakeOperator(splitat, argc=2, argextend=True),
+	'swap'			: MakeOperator(lambda a,b: (b,a), argc=2, argextend=True),
+
+	'choose' 		: MakeOperator(lambda first,second,predicate: first if predicate else second, argc=3),
+	'slice' 		: MakeOperator(slice_, argc=3),
+
+	'pathsum' 		: MakeOperator(lambda a: os.path.join(*a), argc=None),
+	'sum' 			: MakeOperator(_sum, argc=None),
+	'strsum' 		: MakeOperator(strsum, argc=None),
+
+	'truncate'		: MakeOperator(truncate, argc=1),
+
+	'repeat' 		: MakeOperator(repeat, argc=1, argout=False, passenv=True),
 }
 
 # A handy dictionary of macro symbols.
+# Macros are expanded only once, so we cannot use macros inside macros (ie. no nesting)
+# This is only for convenience / basic syntactic sugar.
 
 MacroSymbols = {
-	'>': 	'gt',
-	'<':	'lt',
-	'==':	'eq',
-	'>=':	'ge',
-	'!':	'not',
-	'&': 	'and',
-	'|': 	'or',
-	'~': 	'makeref',
-	'*': 	'mul',
-	'+': 	'add',
-	'-': 	'sub',
-	'/': 	'div',
-	'^': 	'ceil',
-	'_': 	'floor',
-	'<>': 	'at',
-	'||': 	'length',
-	'[]': 	'slice',
-	'{}': 	'groupby',
-	'?': 	'choose',
-	'?]': 	'startswith',
-	'[?': 	'endswith',
-	'//': 	'paths',
-	'@': 	'iteritems',
-	'$': 	'squash',
-	'sum': 	'add squash',
-	'prod': 'mul squash',
-	'any': 	'or squash',
-	'all': 	'and squash',
-	'//+': 	'pathjoin squash',
-	'/+': 	'pathjoin',
-	'**': 	'pow',
-	'*2': 	'2 pow',
+	'>': 		'gt',
+	'<':		'lt',
+	'==':		'eq',
+	'>=':		'ge',
+	'!':		'not',
+	'!none':	'isnone not',
+	'&': 		'and',
+	'|': 		'or',
+	'~': 		'makeref',
+	'*': 		'mul',
+	'+': 		'add',
+	'-': 		'sub',
+	'/': 		'div',
+	'^': 		'ceil',
+	'_': 		'floor',
+	'<>': 		'at',
+	'||': 		'length',
+	'[]': 		'slice',
+	':]': 		'startslice',
+	'[:': 		'endslice',
+	'{}': 		'groupby',
+	'?': 		'choose',
+	'?]': 		'startswith',
+	'[?': 		'endswith',
+	'//': 		'paths',
+	'@': 		'iteritems',
+	'prod': 	'"mul" repeat',
+	'//+': 		'pathsum',
+	'/+': 		'pathjoin',
+	'**': 		'pow',
+	'*2': 		'2 pow',
 }
 
 ###############################################################################
@@ -576,10 +493,8 @@ class Pretzyl:
 				self.stacks[-1], items = self.stacks[-1][:-count], self.stacks[-1][-count:]
 				assert(len(items) == count)
 			else:
-				# nothing to do, return None
-				return None
-				# remove all items from the stack
-				#self.stacks[-1], items = [], self.stacks[-1]
+				# nothing to do, return an empty list (count is 0)
+				return []
 			assert(len(items) == count)
 		# do lookup, if required
 		if lookup:
@@ -592,6 +507,13 @@ class Pretzyl:
 		if self.depth() + 1 > self.STACKLIMIT:
 			raise StackOverflow("stack overflow, stack depth %i exceeds STACKLIMIT %i" % (self.depth(), self.STACKLIMIT))
 		self.stacks[-1].append(value)
+
+	def extend(self, list):
+		"""Appends a list of tokens onto the topmost stack
+		"""
+		if self.depth() + len(list) > self.STACKLIMIT:
+			raise StackOverflow("stack overflow, stack depth %i exceeds STACKLIMIT %i" % (self.depth(), self.STACKLIMIT))
+		self.stacks[-1].extend(list)
 
 	def depth(self):
 		"""Retuens the depth of the topmost stack
@@ -622,39 +544,35 @@ class Pretzyl:
 		else:
 			pass
 
-	def makeoperator(self, token):
-		"""This method attempts to make an operator (possibly with modifier) out of a token
-		If succesful, the operator(+modifier) is executed, and the method returns True.
-		Otherwise, the method returns False.
+	def getoperator(self, token):
+		"""This method attempts to get an operator (possibly with modifier) from a token
+		If succesful, the operator is returned.
+		Otherwise, the method returns None
 		"""
 		log("makeoperator[%s]:" % token)
 		if not isinstance(token, Reference):
 			# simply return false, this is not a reference
 			log("-> not a reference")
-			return False
+			return None
 		openv = self.getopenv()
-		if token.name in openv:
-			obj = openv[token.name]
-		else:
-			return False
 		try:
-			if isinstance(obj, Operator):
-				log("-> found Operator")
-			elif 'pretzyloperator' in obj.__dict__ and obj.__dict__['pretzyloperator']:
-				log("-> found wrapped operator function")
-			else:
-				log("-> not an Operator or wrapped operator function")
-				return False
+			obj = openv[token.name]
+			if not obj.__dict__['pretzyloperator']:
+				log("-> found object is not a proper operator")
+				return None
+		except KeyError as e:
+			log("-> obj not found in openv")
+			return None
 		except AttributeError as e:
 			log("-> error accessing attributes, discarding operator")
-			return False
-		# At this point, the object should be an operator.
+			return None
 		operator = obj
+		return operator
+
+	def runoperator(self, operator):
 		log("running operator [%s], last operator is [%s]" % (operator, self.lastop))
-		# pass our environment to the operator for evaluation.
 		operator(self)
 		self.lastop = operator
-		return True
 
 	def tokenize(self, line, specialchars = ""):
 		tokens = [convert(token) for token in tokenize(line, self.macros, specialchars = specialchars)]
@@ -665,14 +583,16 @@ class Pretzyl:
 		It returns the count number of items from the bottom level stack, and looks
 		up their values in the environment if requested.
 		"""
+		log("evaltokens: ", tokens)
 		# each evaluation starts off with a new stack
 		self.stacks = [[]]
 		self.lastop = None
 		log("tokens are ", tokens)
-		tokens.reverse()
+		#tokens.reverse()
 		# evaluate one token at a time.
-		while len(tokens) > 0:
-			token = tokens.pop()
+		#while len(tokens) > 0:
+		for token in tokens:
+			#token = tokens.pop()
 			log("looking at token [%s], stack depth: %i" % (token, self.depth()))
 			if isinstance(token, Reference):
 				if token.name == PUSHTOKEN:
@@ -686,7 +606,9 @@ class Pretzyl:
 					self.popstack()
 					continue
 				else:
-					if self.makeoperator(token):
+					operator = self.getoperator(token)
+					if operator is not None:
+						self.runoperator(operator)
 						continue
 			# otherwise push it onto the stack
 			log("-> token [%s] is a literal, adding to stack" % token)
@@ -702,6 +624,7 @@ class Pretzyl:
 		It returns the count number of items from the bottom level stack, and looks
 		up their values in the environment if requested.
 		"""
+		log("eval: [%s]" % line)
 		if not isinstance(line, str):
 			# we expect a string here
 			raise RuntimeError("expected a string, found type %s instead: " % (type(line)), line)
