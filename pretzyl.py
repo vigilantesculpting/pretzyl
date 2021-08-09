@@ -640,7 +640,7 @@ class BaseException(Exception):
 	"""Base exception class for this module
 	"""
 	def __init__(self, message):
-		Exception.__init__(self)
+		Exception.__init__(self, message)
 
 class RecursionOverflow(BaseException):
 	"""Recursion overflow
