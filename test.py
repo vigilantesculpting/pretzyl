@@ -122,6 +122,24 @@ def test():
 	testexpr(p, "4 *2", [16])
 	testexpr(p, "4 4 **", [256])
 
+	# add
+	testexpr(p, "14 5 +", [19])
+	testexpr(p, "14.0 5 +", [19.0])
+	# sub
+	testexpr(p, "14 5 -", [9])
+	testexpr(p, "14.0 5 -", [9.0])
+	# mul
+	testexpr(p, "14 5 *", [70])
+	testexpr(p, "14.0 5 *", [70.0])
+	# div
+	testexpr(p, "14 5 /", [2.8])
+	testexpr(p, "14 5 //", [2])
+	testexpr(p, "14.0 5 //", [2.8])
+	# ceil
+	testexpr(p, "2.8 ^", [3.0])
+	testexpr(p, "14 5 /^", [3.0])
+	testexpr(p, "14 5 /^ int", [3])
+
 	# at
 	testexpr(p, "('jack' 'suzy' 'mary') 2 <>", ["mary"])
 

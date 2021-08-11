@@ -336,7 +336,8 @@ DefaultOperators = {
 	'mul' 			: MakeOperator(operator.mul, argc=2),
 	'add' 			: MakeOperator(operator.add, argc=2),
 	'sub' 			: MakeOperator(operator.sub, argc=2),
-	'div' 			: MakeOperator(operator.div, argc=2),
+	'intdiv' 		: MakeOperator(operator.div, argc=2),
+	'floatdiv'		: MakeOperator(operator.truediv, argc=2),
 	'pow' 			: MakeOperator(operator.pow, argc=2),
 
 	'at' 			: MakeOperator(operator.getitem, argc=2),
@@ -383,8 +384,10 @@ MacroSymbols = {
 	'*': 		'mul',
 	'+': 		'add',
 	'-': 		'sub',
-	'/': 		'div',
+	'/': 		'floatdiv', 		# "14 5 /"  -> 14.0 / 5.0 == 2.8
+	'//': 		'intdiv', 			# "14 5 //" -> 14   / 5   == 2
 	'^': 		'ceil',
+	'/^': 		'floatdiv ceil', 	# "14 5 /^"  -> 14.0 / 5.0 ceil == 3.0
 	'_': 		'floor',
 	'<>': 		'at',
 	'||': 		'length',
@@ -395,7 +398,7 @@ MacroSymbols = {
 	'?': 		'choose',
 	'?]': 		'startswith',
 	'[?': 		'endswith',
-	'//': 		'paths',
+	#'//': 		'paths',
 	'@': 		'iteritems',
 	'prod': 	'"mul" repeat',
 	'//+': 		'pathsum',
