@@ -398,7 +398,6 @@ MacroSymbols = {
 	'?': 		'choose',
 	'?]': 		'startswith',
 	'[?': 		'endswith',
-	#'//': 		'paths',
 	'@': 		'iteritems',
 	'prod': 	'"mul" repeat',
 	'//+': 		'pathsum',
